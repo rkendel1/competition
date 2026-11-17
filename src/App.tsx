@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { useConnectionState, useFeltKit, useMutation, useQueryState, useSession, type FeltKitClientError } from "@feltdb/feltkit/react";
 import { api } from "../feltkit/_generated/api";
 import { ThemeToggle } from "./theme";
@@ -26,15 +26,6 @@ export function App() {
   const principal = session?.principal ?? null;
   // UI hint only. The server enforces access on every call regardless of what the UI shows.
   const canWrite = can(session?.permissions ?? [], "intel.write");
-
-  // In development, sign in as the first dev user so the app works on first load.
-  const tried = useRef(false);
-  useEffect(() => {
-    if (session && !principal && session.devUsers.length && !tried.current) {
-      tried.current = true;
-      void signInAsDevUser(session.devUsers[0]!.id);
-    }
-  }, [session, principal, signInAsDevUser]);
 
   useEffect(() => {
     if (!notice) return;
@@ -145,22 +136,21 @@ function SignedOut(props: {
   return (
     <div className="center">
       <div className="card narrow">
-        {props.devUsers.length ? (
-          <>
-            <h1>Sign in</h1>
-            <p className="muted">Development identities from feltkit/app.ts:</p>
-            <div className="stack">
-              {props.devUsers.map((u) => (
-                <button key={u.id} className="secondary wide" onClick={() => props.onDevSignIn(u.id)}>
-                  {u.name} <span className="muted">· {u.roles.join(", ")}</span>
-                </button>
-              ))}
-            </div>
-          </>
-        ) : props.accounts ? (
+        {props.accounts ? (
           <AccountForm signUpOpen={props.accounts.signUp} email={Boolean(props.accounts.email)} providers={props.accounts.providers ?? []} onSignIn={props.onSignIn} onSignUp={props.onSignUp} />
-        ) : (
+        ) : props.devUsers.length ? null : (
           <SessionForm />
+        )}
+        {props.devUsers.length > 0 && (
+          <div className="stack" style={props.accounts ? { marginTop: 20 } : undefined}>
+            <h2>{props.accounts ? "Or tour the app without an account" : "Tour the app"}</h2>
+            <p className="muted">Try it as one of these development identities:</p>
+            {props.devUsers.map((u) => (
+              <button key={u.id} className="secondary wide" onClick={() => props.onDevSignIn(u.id)}>
+                {u.name} <span className="muted">· {u.roles.join(", ")}</span>
+              </button>
+            ))}
+          </div>
         )}
       </div>
     </div>
