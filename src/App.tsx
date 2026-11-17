@@ -23,6 +23,7 @@ export function App() {
   const { session, signInAsDevUser, signIn, signUp, signOut } = useSession();
   const live = useConnectionState();
   const [notice, setNotice] = useState<Notice>(null);
+  const [showSignIn, setShowSignIn] = useState(false);
   const principal = session?.principal ?? null;
   // UI hint only. The server enforces access on every call regardless of what the UI shows.
   const canWrite = can(session?.permissions ?? [], "intel.write");
@@ -106,16 +107,25 @@ export function App() {
             <ResetForm token={resetToken} onDone={() => (setResetToken(null), setNotice({ tone: "info", text: "Your password is set. Other sessions were signed out." }))} />
           </div>
         </div>
-      ) : !principal ? (
-        <SignedOut
-          devUsers={session.devUsers}
-          accounts={session.accounts ?? null}
-          onDevSignIn={(id) => signInAsDevUser(id).catch(report)}
-          onSignIn={signIn}
-          onSignUp={signUp}
-        />
       ) : (
-        <Workspace canWrite={canWrite} role={principal.roles.join(", ")} onError={report} />
+        <>
+          {!principal && (
+            <div className="notice info" role="status">
+              You’re browsing without an account (read-only).
+              <button className="secondary" onClick={() => setShowSignIn((v) => !v)}>{showSignIn ? "Hide" : "Sign in or create an account"}</button>
+            </div>
+          )}
+          {!principal && showSignIn && (
+            <SignedOut
+              devUsers={session.devUsers}
+              accounts={session.accounts ?? null}
+              onDevSignIn={(id) => signInAsDevUser(id).catch(report)}
+              onSignIn={signIn}
+              onSignUp={signUp}
+            />
+          )}
+          <Workspace canWrite={canWrite} role={principal ? principal.roles.join(", ") : "visitor"} signedIn={Boolean(principal)} onError={report} />
+        </>
       )}
 
       {session && !session.environment.production && (

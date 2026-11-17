@@ -92,7 +92,9 @@ test("viewers read; they cannot add competitors or capture", async () => {
     assert.equal((await grace.query(api.intel.listCompetitors)).length, 1);
     await assert.rejects(grace.mutation(api.intel.addCompetitor, { site: "other.com" }), { code: "FORBIDDEN" });
     await assert.rejects(grace.action(api.capture.paste, { competitorId: id, xml: OCTOBER }), { code: "FORBIDDEN" });
-    await assert.rejects(t.query(api.intel.listCompetitors), { code: "UNAUTHORIZED" });
+    // Visitors with no account can read, but not change anything.
+    assert.equal((await t.query(api.intel.listCompetitors)).length, 1);
+    await assert.rejects(t.mutation(api.intel.addCompetitor, { site: "other.com" }), { code: "UNAUTHORIZED" });
   } finally {
     await t.close();
   }

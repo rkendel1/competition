@@ -12,7 +12,7 @@ const dateFmt = new Intl.DateTimeFormat(undefined, { year: "numeric", month: "sh
 const when = (ms?: number) => (ms ? dateFmt.format(ms) : "—");
 const n = (x: number) => x.toLocaleString();
 
-export function Workspace({ canWrite, role, onError }: { canWrite: boolean; role: string; onError: OnError }) {
+export function Workspace({ canWrite, role, signedIn, onError }: { canWrite: boolean; role: string; signedIn: boolean; onError: OnError }) {
   const competitors = useQueryState(api.intel.listCompetitors);
   const [selected, setSelected] = useState<string | null>(null);
   const list = competitors.data ?? [];
@@ -41,7 +41,7 @@ export function Workspace({ canWrite, role, onError }: { canWrite: boolean; role
             </button>
           ))}
         </nav>
-        {canWrite ? <AddCompetitor onAdded={setSelected} onError={onError} /> : <p className="hint">You’re signed in as a {role}: you can read reports but not add competitors or capture sitemaps.</p>}
+        {canWrite ? <AddCompetitor onAdded={setSelected} onError={onError} /> : <p className="hint">{signedIn ? `You’re signed in as a ${role}: ` : "You’re a visitor: "}you can read reports but not add competitors or capture sitemaps.</p>}
       </aside>
       <main className="main wide">
         {current ? (

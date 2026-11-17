@@ -9,7 +9,7 @@ import { bidTerms, defaultSitemapUrl, diffUrls, domainOf, targetsBrand, type Cat
 // ---------- your brand ----------
 
 export const getProfile = app.query({
-  access: "intel.read",
+  access: "public",
   returns: s.object({ brand: s.string() }),
   capability: { name: "intel.profile", description: "Your own brand name, used to flag competitor pages that target you." },
   handler: async (ctx) => {
@@ -45,7 +45,7 @@ const CompetitorRow = s.object({
 });
 
 export const listCompetitors = app.query({
-  access: "intel.read",
+  access: "public",
   returns: s.array(CompetitorRow),
   capability: { name: "intel.competitors", description: "Tracked competitors with when their sitemap was last captured." },
   handler: async (ctx) => {
@@ -147,7 +147,7 @@ export const removeCompetitor = app.mutation({
 });
 
 export const listSnapshots = app.query({
-  access: "intel.read",
+  access: "public",
   args: { competitorId: s.string() },
   returns: s.array(s.doc(snapshots)),
   handler: async (ctx, { competitorId }) =>
@@ -203,7 +203,7 @@ const LIST_CAP = 200;
 const DAY = 86_400_000;
 
 export const report = app.query({
-  access: "intel.read",
+  access: "public",
   args: { competitorId: s.string(), windowDays: s.optional(s.integer({ minimum: 1, maximum: 365 })), now: s.optional(s.number()) },
   returns: Report,
   capability: {
