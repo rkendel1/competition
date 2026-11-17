@@ -39,6 +39,9 @@ const CompetitorRow = s.object({
   lastSnapshotAt: s.optional(s.number()),
   lastUrlCount: s.optional(s.integer()),
   snapshotCount: s.integer(),
+  /** A capture that is queued or running now. */
+  capturing: s.optional(s.enum(["queued", "collecting"])),
+  schedule: s.optional(s.object({ cadence: s.string(), anchorAt: s.number(), nextRunAt: s.number(), setBy: s.string(), lastRequestedAt: s.optional(s.number()) })),
 });
 
 export const listCompetitors = app.query({
@@ -46,10 +49,13 @@ export const listCompetitors = app.query({
   returns: s.array(CompetitorRow),
   capability: { name: "intel.competitors", description: "Tracked competitors with when their sitemap was last captured." },
   handler: async (ctx) => {
-    const [all, snaps] = await Promise.all([ctx.db.find(competitors, {}, { orderBy: [{ field: "createdAt", direction: "asc" }] }), ctx.db.find(snapshots, { state: "complete" })]);
+    const [all, snaps] = await Promise.all([ctx.db.find(competitors, {}, { orderBy: [{ field: "createdAt", direction: "asc" }] }), ctx.db.find(snapshots)]);
     return all.map((c) => {
-      const mine = snaps.filter((x) => x.competitorId === c.id).sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0));
+      const theirs = snaps.filter((x) => x.competitorId === c.id);
+      const mine = theirs.filter((x) => x.state === "complete").sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0));
       const last = mine[0];
+      const busy = theirs.find((x) => x.state === "queued" || x.state === "collecting");
+      const sch = c.schedule;
       return {
         id: c.id,
         name: c.name,
@@ -57,6 +63,10 @@ export const listCompetitors = app.query({
         sitemapUrl: c.sitemapUrl,
         ...(last ? { lastSnapshotAt: last.completedAt, lastUrlCount: last.urlCount } : {}),
         snapshotCount: mine.length,
+        ...(busy ? { capturing: busy.state as "queued" | "collecting" } : {}),
+        ...(sch
+          ? { schedule: { cadence: sch.cadence, anchorAt: sch.anchorAt, nextRunAt: sch.nextRunAt, setBy: sch.setBy, ...(sch.lastRequestedAt ? { lastRequestedAt: sch.lastRequestedAt } : {}) } }
+          : {}),
       };
     });
   },
@@ -112,6 +122,8 @@ export const deleteSnapshot = app.mutation({
   handler: async (ctx, { id }) => {
     const snap = await ctx.db.get(snapshots, id);
     if (!snap) return { remaining: 0 };
+    // A queued capture can be cancelled (the capturer then skips it); a running one cannot.
+    if (snap.state === "collecting" && Date.now() - snap.startedAt < 30 * 60_000) fail("FAILED_PRECONDITION", "This capture is running. Delete it once it finishes.");
     // Counted before deleting: inside the transaction, count() already reflects pending deletes.
     const total = await ctx.db.count(pages, { snapshotId: id });
     const batch = await ctx.db.find(pages, { snapshotId: id }, { limit: DELETE_BATCH });

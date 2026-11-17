@@ -19,10 +19,24 @@ export const app = feltkit({
     viewer: ["intel.read", "feltkit.agent.read"],
     // Agents (MCP / AppPort) read reports; they cannot add competitors or fetch anything.
     agent: ["intel.read", "feltkit.agent.*"],
+    // The capturer component (gateway/capturer.ts): claims due schedules and requested captures,
+    // fetches sitemaps, and writes snapshots. It acts as the application itself: no person's
+    // session or API key is involved, so schedules keep running whoever is signed in.
+    capturer: ["intel.read", "intel.capture"],
     // Admins configure the app in Studio → Services.
     admin: ["intelligence.*", "credential.*", "configuration.*", "apikeys.*", "webhooks.*", "feltkit.operations.*"],
   },
   auth: { accounts: { roles: ["member"] } },
+  components: {
+    capturer: {
+      entry: "gateway/capturer.ts",
+      routes: ["/capturer/"],
+      required: true,
+      principal: { id: "component:capturer", roles: ["capturer"], displayName: "Sitemap capturer" },
+      network: "egress",
+      description: "Fetches competitors' sitemaps on their schedules and on request, as the application.",
+    },
+  },
   dev: {
     users: [
       { id: "ada", name: "Ada Lovelace", roles: ["member", "admin"] },
@@ -59,6 +73,20 @@ export const competitors = app.collection(
     sitemapUrl: s.string({ minLength: 1, maxLength: 2048 }),
     createdAt: s.number(),
     createdBy: s.string(),
+    /**
+     * How often the capturer reads this competitor's sitemap. Set by a person (intel.write);
+     * `nextRunAt` is advanced by `schedule:claimDue` in the same transaction that records the work.
+     */
+    schedule: s.optional(
+      s.object({
+        cadence: s.enum(["daily", "weekly", "monthly"]),
+        anchorAt: s.number(),
+        nextRunAt: s.number(),
+        setBy: s.string(),
+        setAt: s.number(),
+        lastRequestedAt: s.optional(s.number()),
+      }),
+    ),
   },
   { unique: [["domain"]] },
 );
@@ -73,7 +101,15 @@ export const snapshots = app.collection(
   {
     competitorId: s.ref("competitors"),
     source: s.enum(["fetch", "paste"]),
-    state: s.enum(["collecting", "complete", "failed"]),
+    /**
+     * queued: requested (a person's "Capture now" or a due schedule), waiting for the capturer.
+     * collecting: pages are being written. complete / failed: settled.
+     */
+    state: s.enum(["queued", "collecting", "complete", "failed"]),
+    /** What asked for it: a person (manual), a schedule, or a paste. */
+    trigger: s.optional(s.enum(["manual", "schedule", "paste"])),
+    /** The person who asked, or who set the schedule that asked. */
+    requestedBy: s.optional(s.string()),
     startedAt: s.number(),
     completedAt: s.optional(s.number()),
     takenBy: s.string(),
@@ -82,7 +118,7 @@ export const snapshots = app.collection(
     truncated: s.boolean(),
     problems: s.array(s.string({ maxLength: 500 })),
   },
-  { indexes: [{ fields: ["competitorId"] }] },
+  { indexes: [{ fields: ["competitorId"] }, { fields: ["state"] }] },
 );
 
 export const pages = app.collection(

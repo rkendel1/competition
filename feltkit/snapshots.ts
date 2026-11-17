@@ -1,40 +1,98 @@
 /**
- * Snapshot records and the mutations `capture:run` writes through. Each is one atomic commit;
- * only the person who began a snapshot may add to or finish it.
+ * The snapshot lifecycle:
+ *
+ *   queued ──start──▶ collecting ──append…──▶ finish ──▶ complete
+ *      │                   └────────── markFailed ──▶ failed
+ *      └─ (delete: cancel)
+ *
+ * `request` (a person's "Capture now") and `schedule:claimDue` (a due schedule) create a queued
+ * snapshot and, in the same transaction, record durable work for the capturer component
+ * (`ctx.afterCommit.work`). Nothing is queued unless that commit happens, and the work survives
+ * restarts. The component then calls `start`, `append` and `finish` as its own principal.
+ * Pasted XML skips the queue: `begin` creates a collecting snapshot for the person pasting.
+ * Reports only read complete snapshots.
  */
 import { fail, s, type MutationCtx } from "@feltdb/feltkit";
 import { app, competitors, pages, profile, snapshots } from "./app.js";
 import { classify, diffUrls, lastmodMs, targetOf, targetsBrand } from "./_sitemap.js";
 import { BATCH, MAX_FILES } from "./_limits.js";
+import { enqueueCapture, inFlight } from "./_capture.js";
 
 const PageInput = s.object({
   url: s.string({ maxLength: 2048 }),
   lastmod: s.optional(s.string({ maxLength: 64 })),
 });
 
-export const competitorForCapture = app.query({
+/** "Capture now": queue a capture of this competitor's sitemap for the capturer. */
+export const request = app.mutation({
   access: "intel.write",
   args: { competitorId: s.string() },
-  returns: s.object({ sitemapUrl: s.string(), domain: s.string() }),
+  returns: s.string(),
+  capability: { name: "intel.capturenow", description: "Queue a capture of a competitor's sitemap now. The app's capturer fetches it; no API key is needed." },
   handler: async (ctx, { competitorId }) => {
-    const c = await ctx.db.get(competitors, competitorId);
-    if (!c) fail("NOT_FOUND", "No such competitor.");
-    return { sitemapUrl: c.sitemapUrl, domain: c.domain };
+    if (!(await ctx.db.get(competitors, competitorId))) fail("NOT_FOUND", "No such competitor.");
+    const busy = await inFlight(ctx, competitorId);
+    if (busy) fail("FAILED_PRECONDITION", `A capture is already ${busy.state} for this competitor.`);
+    return enqueueCapture(ctx, competitorId, "manual", ctx.auth.requirePrincipal().id);
   },
 });
 
+const Started = s.object({ snapshotId: s.string(), competitorId: s.string(), sitemapUrl: s.string() });
+
+/**
+ * The capturer takes a queued snapshot. If the snapshot is already collecting, an earlier attempt
+ * was interrupted (the component's lease expired): that attempt is marked failed and a fresh
+ * snapshot is started, so a half-written capture never becomes complete. Returns null when the
+ * snapshot was cancelled or is already settled.
+ */
+export const start = app.mutation({
+  access: "intel.capture",
+  args: { snapshotId: s.string() },
+  returns: s.nullable(Started),
+  handler: async (ctx, { snapshotId }) => {
+    const snap = await ctx.db.get(snapshots, snapshotId);
+    if (!snap || snap.state === "complete" || snap.state === "failed") return null;
+    const competitor = await ctx.db.get(competitors, snap.competitorId);
+    if (!competitor) return null;
+    const me = ctx.auth.requirePrincipal().id;
+    if (snap.state === "queued") {
+      await ctx.db.patch(snapshots, snapshotId, { state: "collecting", takenBy: me, startedAt: Date.now() });
+      return { snapshotId, competitorId: competitor.id, sitemapUrl: competitor.sitemapUrl };
+    }
+    await ctx.db.patch(snapshots, snapshotId, { state: "failed", completedAt: Date.now(), problems: [...snap.problems, "Interrupted before it finished; restarted as a new snapshot."].slice(-20) });
+    const fresh = await ctx.db.insert(snapshots, {
+      competitorId: snap.competitorId,
+      source: "fetch",
+      state: "collecting",
+      ...(snap.trigger ? { trigger: snap.trigger } : {}),
+      ...(snap.requestedBy ? { requestedBy: snap.requestedBy } : {}),
+      startedAt: Date.now(),
+      takenBy: me,
+      urlCount: 0,
+      filesRead: [],
+      truncated: false,
+      problems: [],
+    });
+    return { snapshotId: fresh, competitorId: competitor.id, sitemapUrl: competitor.sitemapUrl };
+  },
+});
+
+/** Pasted XML: a collecting snapshot owned by the person pasting. */
 export const begin = app.mutation({
-  access: "intel.write",
-  args: { competitorId: s.string(), source: s.enum(["fetch", "paste"]) },
+  access: "intel.capture",
+  args: { competitorId: s.string() },
   returns: s.string(),
-  handler: async (ctx, { competitorId, source }) => {
+  handler: async (ctx, { competitorId }) => {
     if (!(await ctx.db.get(competitors, competitorId))) fail("NOT_FOUND", "No such competitor.");
+    const me = ctx.auth.requirePrincipal().id;
     return ctx.db.insert(snapshots, {
       competitorId,
-      source,
+      source: "paste",
       state: "collecting",
+      trigger: "paste",
+      requestedBy: me,
       startedAt: Date.now(),
-      takenBy: ctx.auth.requirePrincipal().id,
+      takenBy: me,
       urlCount: 0,
       filesRead: [],
       truncated: false,
@@ -47,12 +105,12 @@ async function collecting(ctx: MutationCtx, snapshotId: string) {
   const snap = await ctx.db.get(snapshots, snapshotId);
   if (!snap) fail("NOT_FOUND", "No such snapshot.");
   if (snap.state !== "collecting") fail("FAILED_PRECONDITION", `This snapshot is ${snap.state}.`);
-  if (snap.takenBy !== ctx.auth.requirePrincipal().id) fail("FORBIDDEN", "Only the person taking a snapshot can add to it.");
+  if (snap.takenBy !== ctx.auth.requirePrincipal().id) fail("FORBIDDEN", "Only the principal taking a snapshot can add to it.");
   return snap;
 }
 
 export const append = app.mutation({
-  access: "intel.write",
+  access: "intel.capture",
   args: { snapshotId: s.string(), pages: s.array(PageInput, { maxItems: BATCH }) },
   handler: async (ctx, { snapshotId, pages: batch }) => {
     const snap = await collecting(ctx, snapshotId);
@@ -77,7 +135,7 @@ export const append = app.mutation({
 });
 
 export const finish = app.mutation({
-  access: "intel.write",
+  access: "intel.capture",
   args: { snapshotId: s.string(), filesRead: s.array(s.string()), truncated: s.boolean(), problems: s.array(s.string()) },
   returns: s.object({ newSignals: s.integer(), newTargetingYou: s.integer() }),
   handler: async (ctx, { snapshotId, filesRead, truncated, problems }) => {
@@ -109,6 +167,7 @@ export const finish = app.mutation({
     ctx.afterCommit.webhooks.emit("snapshot.completed", {
       snapshotId,
       competitorId: snap.competitorId,
+      trigger: snap.trigger ?? "manual",
       urls: current.length,
       comparedWithPrevious: Boolean(previous),
       newSignals,
@@ -119,7 +178,7 @@ export const finish = app.mutation({
 });
 
 export const markFailed = app.mutation({
-  access: "intel.write",
+  access: "intel.capture",
   args: { snapshotId: s.string(), problems: s.array(s.string()), filesRead: s.array(s.string()) },
   handler: async (ctx, { snapshotId, problems, filesRead }) => {
     await collecting(ctx, snapshotId);
@@ -131,4 +190,3 @@ export const markFailed = app.mutation({
     });
   },
 });
-

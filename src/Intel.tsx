@@ -30,7 +30,10 @@ export function Workspace({ canWrite, role, onError }: { canWrite: boolean; role
             <button key={c.id} className={`project ${current?.id === c.id ? "active" : ""}`} onClick={() => setSelected(c.id)}>
               <span className="project-name">
                 {c.name}
-                <span className="sub">{c.domain}</span>
+                <span className="sub">
+                  {c.domain}
+                  {c.capturing ? " · capturing" : c.schedule ? ` · ${c.schedule.cadence}` : ""}
+                </span>
               </span>
               <span className="count" title={c.lastSnapshotAt ? `Last captured ${when(c.lastSnapshotAt)}` : "Not captured yet"}>
                 {c.lastUrlCount !== undefined ? n(c.lastUrlCount) : "—"}
@@ -42,7 +45,7 @@ export function Workspace({ canWrite, role, onError }: { canWrite: boolean; role
       </aside>
       <main className="main wide">
         {current ? (
-          <Report key={current.id} competitorId={current.id} canWrite={canWrite} onError={onError} />
+          <Report key={current.id} competitorId={current.id} capturing={current.capturing} schedule={current.schedule} canWrite={canWrite} onError={onError} />
         ) : (
           <div className="empty">
             <h1>Read a competitor’s sitemap</h1>
@@ -118,7 +121,7 @@ function AddCompetitor({ onAdded, onError, large }: { onAdded: (id: string) => v
 type ReportData = NonNullable<ReturnType<typeof useQueryState<typeof api.intel.report>>["data"]>;
 type Row = ReportData["attacks"][number];
 
-function Report({ competitorId, canWrite, onError }: { competitorId: string; canWrite: boolean; onError: OnError }) {
+function Report({ competitorId, capturing, schedule, canWrite, onError }: { competitorId: string; capturing?: "queued" | "collecting"; schedule?: Schedule; canWrite: boolean; onError: OnError }) {
   const [windowDays, setWindowDays] = useState(30);
   const report = useQueryState(api.intel.report, { competitorId, windowDays });
   const r = report.data;
@@ -143,8 +146,9 @@ function Report({ competitorId, canWrite, onError }: { competitorId: string; can
             )}
           </div>
         </div>
-        {canWrite && <Capture competitorId={competitorId} onError={onError} />}
+        {canWrite && <Capture competitorId={competitorId} capturing={capturing} onError={onError} />}
       </header>
+      <ScheduleCard key={schedule?.nextRunAt ?? "none"} competitorId={competitorId} schedule={schedule} canWrite={canWrite} onError={onError} />
 
       {snap?.problems.length ? (
         <details className="problems">
@@ -162,7 +166,7 @@ function Report({ competitorId, canWrite, onError }: { competitorId: string; can
       {!snap ? (
         <div className="empty-card">
           <p>
-            No complete snapshot yet. <strong>Capture</strong> fetches <code>{r.competitor.sitemapUrl}</code> (falling back to <code>robots.txt</code>) and follows sitemap indexes. If the site blocks automated requests, open the sitemap in your browser and <strong>paste XML</strong> instead.
+            No complete snapshot yet. <strong>Capture now</strong> (or a schedule) has the app's capturer fetch <code>{r.competitor.sitemapUrl}</code> (falling back to <code>robots.txt</code>) and follows sitemap indexes. If the site blocks automated requests, open the sitemap in your browser and <strong>paste XML</strong> instead.
           </p>
           <History competitorId={competitorId} canWrite={canWrite} onError={onError} />
         </div>
@@ -363,20 +367,30 @@ function BidTerms({ terms, competitor, targets }: { terms: string[]; competitor:
   );
 }
 
-function Capture({ competitorId, onError }: { competitorId: string; onError: OnError }) {
-  const capture = useAction(api.capture.run);
+function Capture({ competitorId, capturing, onError }: { competitorId: string; capturing?: "queued" | "collecting"; onError: OnError }) {
+  const request = useMutation(api.snapshots.request);
+  const paste = useAction(api.capture.paste);
   const [pasting, setPasting] = useState(false);
   const [xml, setXml] = useState("");
   const [result, setResult] = useState<string | null>(null);
-  const last = capture.events.filter((e) => e.type === "progress").at(-1) as { stage?: string; files?: number; urls?: number; saved?: number } | undefined;
+  const last = paste.events.filter((e) => e.type === "progress").at(-1) as { stage?: string; urls?: number; saved?: number } | undefined;
 
-  const go = async (body?: string) => {
+  const captureNow = async () => {
     setResult(null);
     try {
-      const r = await capture.run(body ? { competitorId, xml: body } : { competitorId });
-      if (r.state === "failed") setResult(`Capture failed: ${r.problems.at(-1) ?? "unknown reason"}`);
+      await request({ competitorId });
+    } catch (err) {
+      onError(err);
+    }
+  };
+
+  const savePaste = async () => {
+    setResult(null);
+    try {
+      const r = await paste.run({ competitorId, xml });
+      if (r.state === "failed") setResult(`Not saved: ${r.problems.at(-1) ?? "unknown reason"}`);
       else {
-        setResult(`Captured ${n(r.urlCount)} pages.`);
+        setResult(`Saved ${n(r.urlCount)} pages.`);
         setPasting(false);
         setXml("");
       }
@@ -388,26 +402,105 @@ function Capture({ competitorId, onError }: { competitorId: string; onError: OnE
   return (
     <div className="capture">
       <div className="row">
-        <button className="primary" disabled={capture.running} onClick={() => void go()}>
-          {capture.running ? "Capturing…" : "Capture now"}
+        <button className="primary" disabled={!!capturing || paste.running} onClick={() => void captureNow()} title="The app's capturer fetches the sitemap now. No API key needed.">
+          {capturing === "queued" ? "Queued…" : capturing === "collecting" ? "Capturing…" : "Capture now"}
         </button>
-        <button className="ghost" disabled={capture.running} onClick={() => setPasting((p) => !p)}>
+        <button className="ghost" disabled={paste.running} onClick={() => setPasting((p) => !p)}>
           Paste XML
         </button>
       </div>
-      {capture.running && last && (
-        <div className="muted small">
-          {last.stage === "saving" ? `Saving ${n(last.saved ?? 0)} / ${n(last.urls ?? 0)}` : `Read ${last.files ?? 0} file(s), ${n(last.urls ?? 0)} URLs`}
-        </div>
-      )}
+      {paste.running && last && <div className="muted small">{last.stage === "saving" ? `Saving ${n(last.saved ?? 0)} / ${n(last.urls ?? 0)}` : `Read ${n(last.urls ?? 0)} URLs`}</div>}
       {result && <div className="muted small">{result}</div>}
       {pasting && (
         <div className="paste">
-          <textarea value={xml} onChange={(e) => setXml(e.target.value)} placeholder="Paste the sitemap XML (a <urlset> or a <sitemapindex>)" rows={6} />
-          <button className="primary" disabled={!xml.trim() || capture.running} onClick={() => void go(xml)}>
+          <textarea value={xml} onChange={(e) => setXml(e.target.value)} placeholder="Paste the sitemap XML (a <urlset>)" rows={6} />
+          <button className="primary" disabled={!xml.trim() || paste.running} onClick={() => void savePaste()}>
             Save snapshot
           </button>
         </div>
+      )}
+    </div>
+  );
+}
+
+type Schedule = { cadence: string; anchorAt: number; nextRunAt: number; setBy: string; lastRequestedAt?: number };
+
+const dateTimeFmt = new Intl.DateTimeFormat(undefined, { weekday: "short", year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short" });
+
+/** A datetime-local value (the browser's own time zone) for an instant, and back. */
+function toLocalInput(ms: number): string {
+  const d = new Date(ms);
+  const pad = (x: number) => String(x).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+function defaultFirstRun(): number {
+  const d = new Date();
+  d.setDate(d.getDate() + 1);
+  d.setHours(9, 0, 0, 0);
+  return d.getTime();
+}
+
+function ScheduleCard({ competitorId, schedule, canWrite, onError }: { competitorId: string; schedule?: Schedule; canWrite: boolean; onError: OnError }) {
+  const set = useMutation(api.schedule.set);
+  const clear = useMutation(api.schedule.clear);
+  const [editing, setEditing] = useState(false);
+  const [cadence, setCadence] = useState<"daily" | "weekly" | "monthly">((schedule?.cadence as "monthly") ?? "monthly");
+  const [first, setFirst] = useState(toLocalInput(schedule ? schedule.nextRunAt : defaultFirstRun()));
+  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    const firstRunAt = new Date(first).getTime(); // datetime-local is read in the browser's time zone
+    try {
+      await set({ competitorId, cadence, firstRunAt });
+      setEditing(false);
+    } catch (err) {
+      onError(err);
+    }
+  };
+
+  return (
+    <div className="schedule">
+      {schedule && !editing ? (
+        <div className="row">
+          <span>
+            <strong>Captures {schedule.cadence}</strong> · next {dateTimeFmt.format(schedule.nextRunAt)}
+            {schedule.lastRequestedAt ? <span className="muted"> · last ran {when(schedule.lastRequestedAt)}</span> : null}
+            <span className="muted"> · set by {schedule.setBy}</span>
+          </span>
+          {canWrite && (
+            <>
+              <button className="ghost small" onClick={() => setEditing(true)}>
+                Change
+              </button>
+              <button className="ghost small" onClick={() => void clear({ competitorId }).catch(onError)}>
+                Turn off
+              </button>
+            </>
+          )}
+        </div>
+      ) : canWrite && (editing || !schedule) ? (
+        <form className="row" onSubmit={save}>
+          <span>Capture</span>
+          <select value={cadence} onChange={(e) => setCadence(e.target.value as "monthly")} aria-label="How often">
+            <option value="daily">daily</option>
+            <option value="weekly">weekly</option>
+            <option value="monthly">monthly</option>
+          </select>
+          <span>starting</span>
+          <input type="datetime-local" value={first} onChange={(e) => setFirst(e.target.value)} aria-label="First capture" required />
+          <span className="muted small">{zone}</span>
+          <button className="primary small" type="submit">
+            {schedule ? "Save" : "Schedule"}
+          </button>
+          {editing && (
+            <button className="ghost small" type="button" onClick={() => setEditing(false)}>
+              Cancel
+            </button>
+          )}
+        </form>
+      ) : (
+        <span className="muted">No schedule.</span>
       )}
     </div>
   );
@@ -444,7 +537,8 @@ function History({ competitorId, canWrite, onError }: { competitorId: string; ca
               <tr key={x.id}>
                 <td>{when(x.completedAt ?? x.startedAt)}</td>
                 <td>
-                  <span className={`tag ${x.state}`}>{x.state}</span> {x.source}
+                  <span className={`tag ${x.state}`}>{x.state}</span> {x.trigger ?? x.source}
+                  {x.requestedBy ? <span className="muted"> · {x.requestedBy}</span> : null}
                 </td>
                 <td className="num">{n(x.urlCount)} pages</td>
                 {canWrite && (

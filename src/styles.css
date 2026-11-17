@@ -191,3 +191,7 @@ a.button { display: inline-flex; align-items: center; text-decoration: none; col
 .report button.ghost, .report a.ghost, .sidebar button.ghost { font-size: 14px; border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; background: var(--surface); }
 .report button.ghost.small { font-size: 13px; padding: 3px 9px; }
 .report button.ghost:disabled { opacity: 0.5; cursor: default; }
+.schedule { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 14px; margin-bottom: 14px; font-size: 14px; }
+.schedule select, .schedule input { padding: 5px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.schedule button.ghost { font-size: 13px; border: 1px solid var(--line); border-radius: 8px; padding: 3px 9px; background: var(--surface); }
+.tag.queued, .tag.collecting { color: var(--warn); }

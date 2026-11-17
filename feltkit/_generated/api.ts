@@ -4,7 +4,8 @@ import { createApi } from "@feltdb/feltkit/client";
 import type * as app_module from "../app.js";
 import type * as capture_module from "../capture.js";
 import type * as intel_module from "../intel.js";
+import type * as schedule_module from "../schedule.js";
 import type * as snapshots_module from "../snapshots.js";
 
 /** Typed references to every query and mutation. Type-only imports: no backend code reaches the browser. */
-export const api = createApi<{ "app": typeof app_module; "capture": typeof capture_module; "intel": typeof intel_module; "snapshots": typeof snapshots_module }>();
+export const api = createApi<{ "app": typeof app_module; "capture": typeof capture_module; "intel": typeof intel_module; "schedule": typeof schedule_module; "snapshots": typeof snapshots_module }>();
