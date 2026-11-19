@@ -85,7 +85,11 @@ test("a schedule set in the app runs by itself through the capturer component, w
     const done = await until("the manual capture", async () => (await client.query(api.intel.listSnapshots, { competitorId: id })).find((x) => x.id === manual && x.state === "complete"));
     assert.equal(done.trigger, "manual");
 
-    const status = (await (await fetch(`${url}/capturer/status`)).json()) as { done: number; lastTickError: string | null };
+    // The capturer also reads the competitor's own pages after the snapshot completes, so its counter lags the snapshot.
+    const status = await until("the capturer to count both captures", async () => {
+      const x = (await (await fetch(`${url}/capturer/status`)).json()) as { done: number; lastTickError: string | null };
+      return x.done >= 2 && x;
+    });
     assert.equal(status.done, 2);
     assert.equal(status.lastTickError, null);
   } catch (e) {

@@ -13,7 +13,8 @@
  * Reports only read complete snapshots.
  */
 import { fail, s, type MutationCtx } from "@feltdb/feltkit";
-import { app, competitors, pages, profile, snapshots } from "./app.js";
+import { app, competitors, pages, profile, sites, snapshots } from "./app.js";
+import { siteChanges } from "./_site.js";
 import { classify, diffUrls, lastmodMs, targetOf, targetsBrand } from "./_sitemap.js";
 import { BATCH, MAX_FILES } from "./_limits.js";
 import { enqueueCapture, inFlight } from "./_capture.js";
@@ -37,7 +38,7 @@ export const request = app.mutation({
   },
 });
 
-const Started = s.object({ snapshotId: s.string(), competitorId: s.string(), sitemapUrl: s.string() });
+const Started = s.object({ snapshotId: s.string(), competitorId: s.string(), sitemapUrl: s.string(), domain: s.string() });
 
 /**
  * The capturer takes a queued snapshot. If the snapshot is already collecting, an earlier attempt
@@ -57,7 +58,7 @@ export const start = app.mutation({
     const me = ctx.auth.requirePrincipal().id;
     if (snap.state === "queued") {
       await ctx.db.patch(snapshots, snapshotId, { state: "collecting", takenBy: me, startedAt: Date.now() });
-      return { snapshotId, competitorId: competitor.id, sitemapUrl: competitor.sitemapUrl };
+      return { snapshotId, competitorId: competitor.id, sitemapUrl: competitor.sitemapUrl, domain: competitor.domain };
     }
     await ctx.db.patch(snapshots, snapshotId, { state: "failed", completedAt: Date.now(), problems: [...snap.problems, "Interrupted before it finished; restarted as a new snapshot."].slice(-20) });
     const fresh = await ctx.db.insert(snapshots, {
@@ -73,7 +74,7 @@ export const start = app.mutation({
       truncated: false,
       problems: [],
     });
-    return { snapshotId: fresh, competitorId: competitor.id, sitemapUrl: competitor.sitemapUrl };
+    return { snapshotId: fresh, competitorId: competitor.id, sitemapUrl: competitor.sitemapUrl, domain: competitor.domain };
   },
 });
 
@@ -188,5 +189,39 @@ export const markFailed = app.mutation({
       filesRead: filesRead.slice(0, MAX_FILES + 1),
       problems: problems.slice(0, 20).map((x) => x.slice(0, 500)),
     });
+  },
+});
+
+const SiteInput = s.object({
+  homepage: s.object({
+    url: s.string({ maxLength: 2048 }),
+    title: s.optional(s.string({ maxLength: 200 })),
+    description: s.optional(s.string({ maxLength: 400 })),
+    headline: s.optional(s.string({ maxLength: 200 })),
+  }),
+  pricing: s.optional(
+    s.object({
+      url: s.string({ maxLength: 2048 }),
+      free: s.boolean(),
+      trial: s.boolean(),
+      contactSales: s.boolean(),
+      prices: s.array(s.string({ maxLength: 20 }), { maxItems: 8 }),
+      plans: s.array(s.string({ maxLength: 30 }), { maxItems: 6 }),
+    }),
+  ),
+  about: s.optional(s.object({ url: s.string({ maxLength: 2048 }), summary: s.optional(s.string({ maxLength: 400 })) })),
+});
+
+/** The capturer records what the competitor's own pages say; the record replaces the last one. */
+export const recordSite = app.mutation({
+  access: "intel.capture",
+  args: { competitorId: s.string(), site: SiteInput },
+  handler: async (ctx, { competitorId, site }) => {
+    if (!(await ctx.db.get(competitors, competitorId))) return;
+    const [prev] = await ctx.db.find(sites, { competitorId });
+    const changes = siteChanges(prev, site).slice(0, 12);
+    const value = { competitorId, capturedAt: Date.now(), ...site, changes };
+    if (prev) await ctx.db.replace(sites, prev.id, value);
+    else await ctx.db.insert(sites, value);
   },
 });

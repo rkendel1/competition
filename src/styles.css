@@ -195,3 +195,9 @@ a.button { display: inline-flex; align-items: center; text-decoration: none; col
 .schedule select, .schedule input { padding: 5px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
 .schedule button.ghost { font-size: 13px; border: 1px solid var(--line); border-radius: 8px; padding: 3px 9px; background: var(--surface); }
 .tag.queued, .tag.collecting { color: var(--warn); }
+
+.suggestions { list-style: none; margin: 0 0 12px; padding: 0; display: grid; gap: 6px; }
+.suggestions li { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 8px; }
+.suggestions button { padding: 2px 10px; font-size: 12px; }
+.site-headline { font-size: 1.1rem; font-weight: 600; margin: 0 0 4px; }
+.site-changes, .summary-list { margin: 8px 0 0; padding-left: 20px; display: grid; gap: 4px; }

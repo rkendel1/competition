@@ -15,6 +15,8 @@ const n = (x: number) => x.toLocaleString();
 export function Workspace({ canWrite, role, signedIn, onError }: { canWrite: boolean; role: string; signedIn: boolean; onError: OnError }) {
   const competitors = useQueryState(api.intel.listCompetitors);
   const [selected, setSelected] = useState<string | null>(null);
+  const [view, setView] = useState<"report" | "summary">("report");
+  const pick = (id: string) => (setSelected(id), setView("report"));
   const list = competitors.data ?? [];
   const current = useMemo(() => list.find((c) => c.id === selected) ?? list[0] ?? null, [list, selected]);
 
@@ -24,10 +26,13 @@ export function Workspace({ canWrite, role, signedIn, onError }: { canWrite: boo
     <div className="workspace">
       <aside className="sidebar" aria-label="Competitors">
         <BrandSetting canWrite={canWrite} onError={onError} />
+        <button className={`project ${view === "summary" ? "active" : ""}`} onClick={() => setView("summary")}>
+          <span className="project-name">Summary<span className="sub">All competitors, on demand</span></span>
+        </button>
         <div className="sidebar-title">Competitors</div>
         <nav>
           {list.map((c) => (
-            <button key={c.id} className={`project ${current?.id === c.id ? "active" : ""}`} onClick={() => setSelected(c.id)}>
+            <button key={c.id} className={`project ${view === "report" && current?.id === c.id ? "active" : ""}`} onClick={() => pick(c.id)}>
               <span className="project-name">
                 {c.name}
                 <span className="sub">
@@ -41,10 +46,13 @@ export function Workspace({ canWrite, role, signedIn, onError }: { canWrite: boo
             </button>
           ))}
         </nav>
-        {canWrite ? <AddCompetitor onAdded={setSelected} onError={onError} /> : <p className="hint">{signedIn ? `You’re signed in as a ${role}: ` : "You’re a visitor: "}you can read reports but not add competitors or capture sitemaps.</p>}
+        <Suggestions canWrite={canWrite} onAdded={pick} onError={onError} />
+        {canWrite ? <AddCompetitor onAdded={pick} onError={onError} /> : <p className="hint">{signedIn ? `You’re signed in as a ${role}: ` : "You’re a visitor: "}you can read reports but not add competitors or capture sitemaps.</p>}
       </aside>
       <main className="main wide">
-        {current ? (
+        {view === "summary" ? (
+          <SummaryView />
+        ) : current ? (
           <Report key={current.id} competitorId={current.id} capturing={current.capturing} schedule={current.schedule} canWrite={canWrite} onError={onError} />
         ) : (
           <div className="empty">
@@ -54,7 +62,7 @@ export function Workspace({ canWrite, role, signedIn, onError }: { canWrite: boo
               themselves against (<code>/vs/</code>, <code>/alternative/</code>), what they changed recently (<code>lastmod</code>), and which
               markets they’re entering (<code>/industries/</code>, <code>/solutions/</code>). Add a competitor’s domain to start.
             </p>
-            {canWrite && <AddCompetitor onAdded={setSelected} onError={onError} large />}
+            {canWrite && <AddCompetitor onAdded={pick} onError={onError} large />}
           </div>
         )}
       </main>
@@ -193,6 +201,8 @@ function Report({ competitorId, capturing, schedule, canWrite, onError }: { comp
                 .reduce<ReactNode[]>((acc, el, i) => (i ? [...acc, ", ", el] : [el]), [])}
             </div>
           )}
+
+          <SiteCard competitorId={competitorId} />
 
           <Section title="Who they’re attacking" note="/vs/ and /alternative/ pages: every competitor they position against.">
             {r.targets.length ? (
@@ -571,5 +581,115 @@ function History({ competitorId, canWrite, onError }: { competitorId: string; ca
         </button>
       )}
     </Section>
+  );
+}
+
+/** What their own homepage, pricing and about pages say (read on each capture). */
+function SiteCard({ competitorId }: { competitorId: string }) {
+  const site = useQueryState(api.intel.getSite, { competitorId });
+  const x = site.data;
+  if (!x) return null;
+  const p = x.pricing;
+  return (
+    <Section title="Their site" note={`Read from their own pages on ${when(x.capturedAt)}.`}>
+      {x.homepage.headline && <p className="site-headline">“{x.homepage.headline}”</p>}
+      {x.homepage.description && <p className="muted">{x.homepage.description}</p>}
+      {p && (
+        <div className="chips">
+          {p.prices.length > 0 && <span className="chip">from {p.prices[0]}</span>}
+          {p.free && <span className="chip">free plan</span>}
+          {p.trial && <span className="chip">free trial</span>}
+          {p.contactSales && <span className="chip">sales-led tier</span>}
+          {p.plans.map((t) => (
+            <span key={t} className="chip">{t}</span>
+          ))}
+        </div>
+      )}
+      {x.about?.summary && <p className="muted small">{x.about.summary}</p>}
+      {x.changes.length > 0 && (
+        <ul className="site-changes">
+          {x.changes.map((c) => (
+            <li key={c}>{c}</li>
+          ))}
+        </ul>
+      )}
+    </Section>
+  );
+}
+
+/** Names your competitors position against that you do not track yet. */
+function Suggestions({ canWrite, onAdded, onError }: { canWrite: boolean; onAdded: (id: string) => void; onError: OnError }) {
+  const suggestions = useQueryState(api.intel.suggestions);
+  const add = useMutation(api.intel.addCompetitor);
+  const [busy, setBusy] = useState<string | null>(null);
+  const rows = suggestions.data ?? [];
+  if (!rows.length) return null;
+  const track = async (name: string, domain: string) => {
+    setBusy(name);
+    try {
+      onAdded(await add({ site: domain, name }));
+    } catch (e) {
+      onError(e);
+    } finally {
+      setBusy(null);
+    }
+  };
+  return (
+    <>
+      <div className="sidebar-title">Worth tracking</div>
+      <ul className="suggestions">
+        {rows.map((x) => (
+          <li key={x.name}>
+            <span className="project-name">
+              {x.name}
+              <span className="sub" title={x.namedBy.join(", ")}>named by {x.namedBy.length > 2 ? `${x.namedBy.slice(0, 2).join(", ")} +${x.namedBy.length - 2}` : x.namedBy.join(", ")}</span>
+            </span>
+            {canWrite && (
+              <button className="secondary" disabled={busy === x.name} onClick={() => void track(x.name, x.domainGuess)} title={`Tracks ${x.domainGuess} (a guess: rename or fix the sitemap URL after)`}>
+                Track
+              </button>
+            )}
+          </li>
+        ))}
+      </ul>
+    </>
+  );
+}
+
+/** A summary of every competitor, built on demand from what has been captured. */
+function SummaryView() {
+  const summary = useQueryState(api.intel.summary);
+  const [copied, setCopied] = useState(false);
+  const x = summary.data;
+  if (!x) return <div className="muted">{summary.error ? String(summary.error.message) : "Writing the summary…"}</div>;
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(x.markdown);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      /* clipboard unavailable */
+    }
+  };
+  return (
+    <div className="report">
+      <header className="report-head">
+        <div>
+          <h1>Summary</h1>
+          <div className="muted">{x.headline}</div>
+        </div>
+        <button className="secondary" onClick={() => void copy()}>{copied ? "Copied" : "Copy as Markdown"}</button>
+      </header>
+      {x.sections.map((sec) => (
+        <Section key={sec.title} title={sec.title}>
+          <ul className="summary-list">
+            {sec.bullets.map((b, i) => (
+              <li key={i}>{b}</li>
+            ))}
+          </ul>
+        </Section>
+      ))}
+      <p className="hint">Built from stored captures and each competitor’s own pages. It updates as captures complete.</p>
+    </div>
   );
 }

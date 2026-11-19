@@ -134,3 +134,35 @@ export const pages = app.collection(
   },
   { indexes: [{ fields: ["snapshotId"] }] },
 );
+
+/**
+ * What a competitor's own site says, from the capture's homepage, pricing and about fetches.
+ * One record per competitor, replaced on each capture; `changes` says what differs from the
+ * record it replaced.
+ */
+export const sites = app.collection(
+  "sites",
+  {
+    competitorId: s.string(),
+    capturedAt: s.number(),
+    homepage: s.object({
+      url: s.string({ maxLength: 2048 }),
+      title: s.optional(s.string({ maxLength: 200 })),
+      description: s.optional(s.string({ maxLength: 400 })),
+      headline: s.optional(s.string({ maxLength: 200 })),
+    }),
+    pricing: s.optional(
+      s.object({
+        url: s.string({ maxLength: 2048 }),
+        free: s.boolean(),
+        trial: s.boolean(),
+        contactSales: s.boolean(),
+        prices: s.array(s.string({ maxLength: 20 }), { maxItems: 8 }),
+        plans: s.array(s.string({ maxLength: 30 }), { maxItems: 6 }),
+      }),
+    ),
+    about: s.optional(s.object({ url: s.string({ maxLength: 2048 }), summary: s.optional(s.string({ maxLength: 400 })) })),
+    changes: s.array(s.string({ maxLength: 300 }), { maxItems: 12 }),
+  },
+  { unique: [["competitorId"]] },
+);

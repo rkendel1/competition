@@ -2,8 +2,9 @@
  * Competitors, your brand, and the report: who they target, what changed, which markets.
  * Every number in the report is derived from stored, complete snapshots.
  */
-import { fail, s } from "@feltdb/feltkit";
-import { app, competitors, pages, profile, snapshots } from "./app.js";
+import { fail, s, type QueryCtx } from "@feltdb/feltkit";
+import { app, competitors, pages, profile, sites, snapshots } from "./app.js";
+import { suggest, summarize, type CompetitorDigest, type Suggestion } from "./_site.js";
 import { bidTerms, defaultSitemapUrl, diffUrls, domainOf, targetsBrand, type Category } from "./_sitemap.js";
 
 // ---------- your brand ----------
@@ -142,6 +143,8 @@ export const removeCompetitor = app.mutation({
   args: { id: s.string() },
   handler: async (ctx, { id }) => {
     if ((await ctx.db.count(snapshots, { competitorId: id })) > 0) fail("FAILED_PRECONDITION", "Delete this competitor's snapshots first.");
+    const [site] = await ctx.db.find(sites, { competitorId: id });
+    if (site) await ctx.db.delete(sites, site.id);
     await ctx.db.delete(competitors, id);
   },
 });
@@ -310,3 +313,105 @@ function safePath(url: string): string {
     return url;
   }
 }
+
+
+// ---------- what their own site says ----------
+
+const SiteRow = s.object({
+  capturedAt: s.number(),
+  homepage: s.object({ url: s.string(), title: s.optional(s.string()), description: s.optional(s.string()), headline: s.optional(s.string()) }),
+  pricing: s.optional(
+    s.object({ url: s.string(), free: s.boolean(), trial: s.boolean(), contactSales: s.boolean(), prices: s.array(s.string()), plans: s.array(s.string()) }),
+  ),
+  about: s.optional(s.object({ url: s.string(), summary: s.optional(s.string()) })),
+  changes: s.array(s.string()),
+});
+
+export const getSite = app.query({
+  access: "public",
+  args: { competitorId: s.string() },
+  returns: s.nullable(SiteRow),
+  capability: { name: "intel.site", description: "What a competitor's own homepage, pricing and about pages say, and what changed since the previous capture." },
+  handler: async (ctx, { competitorId }) => {
+    const [site] = await ctx.db.find(sites, { competitorId });
+    if (!site) return null;
+    const { capturedAt, homepage, pricing, about, changes } = site;
+    return { capturedAt, homepage, ...(pricing ? { pricing } : {}), ...(about ? { about } : {}), changes };
+  },
+});
+
+// ---------- suggestions and the summary ----------
+
+/** One digest per tracked competitor, from its latest complete snapshot and site record. */
+async function digests(ctx: { db: QueryCtx["db"] }): Promise<{ brand: string; all: CompetitorDigest[]; mentions: Array<{ by: string; target: string; pages: number }>; tracked: string[] }> {
+  const [cs, snaps, [p]] = await Promise.all([ctx.db.find(competitors, {}, { orderBy: [{ field: "createdAt", direction: "asc" }] }), ctx.db.find(snapshots), ctx.db.find(profile, { scope: "app" })]);
+  const brand = p?.brand ?? "";
+  const all: CompetitorDigest[] = [];
+  const mentions: Array<{ by: string; target: string; pages: number }> = [];
+  for (const c of cs) {
+    const done = snaps.filter((x) => x.competitorId === c.id && x.state === "complete").sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0));
+    const [latest, previous] = done;
+    const [site] = await ctx.db.find(sites, { competitorId: c.id });
+    const d: CompetitorDigest = { name: c.name, domain: c.domain, attackTargets: [], targetsYou: 0, markets: [], addedPages: 0, newMarkets: [] };
+    if (site) d.site = { homepage: site.homepage, ...(site.pricing ? { pricing: site.pricing } : {}), ...(site.about ? { about: site.about } : {}), changes: site.changes };
+    if (latest) {
+      d.snapshot = { urls: latest.urlCount, completedAt: latest.completedAt ?? latest.startedAt };
+      const current = await ctx.db.find(pages, { snapshotId: latest.id });
+      const before = previous ? await ctx.db.find(pages, { snapshotId: previous.id }) : null;
+      const beforeUrls = before ? new Set(before.map((x) => x.url)) : null;
+      const tally = new Map<string, number>();
+      const marketOf = (u: string) => u.replace(/\/$/, "").split("/").pop()!.replace(/[-_]+/g, " ");
+      const markets = new Set<string>();
+      const newMarkets = new Set<string>();
+      for (const x of current) {
+        const isNew = beforeUrls !== null && !beforeUrls.has(x.url);
+        if (isNew) d.addedPages++;
+        if (x.target && (x.categories.includes("vs") || x.categories.includes("alternative"))) {
+          tally.set(x.target, (tally.get(x.target) ?? 0) + 1);
+          if (targetsBrand(x.target, brand)) d.targetsYou++;
+        }
+        if (x.categories.includes("industry") || x.categories.includes("solution")) {
+          const m = marketOf(x.url);
+          if (m && !/^(industries|solutions|use cases?)$/i.test(m)) {
+            markets.add(m);
+            if (isNew) newMarkets.add(m);
+          }
+        }
+      }
+      d.attackTargets = [...tally.entries()].sort((a, b) => b[1] - a[1] || cmp(a[0], b[0])).map(([t]) => t);
+      for (const [t, k] of tally) mentions.push({ by: c.name, target: t, pages: k });
+      d.markets = [...markets].sort(cmp);
+      d.newMarkets = [...newMarkets].sort(cmp);
+    }
+    all.push(d);
+  }
+  return { brand, all, mentions, tracked: cs.flatMap((c) => [c.name, c.domain]) };
+}
+
+const SuggestionRow = s.object({ name: s.string(), namedBy: s.array(s.string()), pages: s.integer(), domainGuess: s.string() });
+
+export const suggestions = app.query({
+  access: "public",
+  returns: s.array(SuggestionRow),
+  capability: {
+    name: "intel.suggestions",
+    description: "Competitors worth tracking next: names your tracked competitors position against in /vs/ and /alternative/ pages that you do not track yet, ranked by how many of them name it.",
+  },
+  handler: async (ctx): Promise<Suggestion[]> => {
+    const { brand, mentions, tracked } = await digests(ctx);
+    return suggest(mentions, tracked, brand);
+  },
+});
+
+export const summary = app.query({
+  access: "public",
+  returns: s.object({ headline: s.string(), sections: s.array(s.object({ title: s.string(), bullets: s.array(s.string()) })), markdown: s.string() }),
+  capability: {
+    name: "intel.summary",
+    description: "A summary of every tracked competitor: who is aimed at you, what moved, how each positions itself, pricing signals, crowded markets and who to track next. Derived from stored captures, no model.",
+  },
+  handler: async (ctx) => {
+    const { brand, all, mentions, tracked } = await digests(ctx);
+    return summarize(brand, all, suggest(mentions, tracked, brand));
+  },
+});
