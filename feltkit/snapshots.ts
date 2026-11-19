@@ -13,7 +13,8 @@
  * Reports only read complete snapshots.
  */
 import { fail, s, type MutationCtx } from "@feltdb/feltkit";
-import { app, competitors, pages, profile, sites, snapshots } from "./app.js";
+import { app, competitors, pageChunks, pages, profile, sites, snapshots } from "./app.js";
+import { readPages } from "./_pages.js";
 import { siteChanges } from "./_site.js";
 import { classify, diffUrls, lastmodMs, targetOf, targetsBrand } from "./_sitemap.js";
 import { BATCH, MAX_FILES } from "./_limits.js";
@@ -117,20 +118,19 @@ export const append = app.mutation({
     const snap = await collecting(ctx, snapshotId);
     const competitor = await ctx.db.get(competitors, snap.competitorId);
     const own = competitor?.name ?? competitor?.domain ?? "";
-    for (const page of batch) {
+    const items = batch.map((page) => {
       const ms = lastmodMs(page.lastmod);
       const target = targetOf(page.url, own) ?? targetOf(page.url, competitor?.domain ?? "");
       const categories = classify(page.url);
-      await ctx.db.insert(pages, {
-        snapshotId,
-        competitorId: snap.competitorId,
+      return {
         url: page.url,
         ...(page.lastmod ? { lastmod: page.lastmod } : {}),
         ...(ms !== undefined ? { lastmodMs: ms } : {}),
         categories,
         ...(target && (categories.includes("vs") || categories.includes("alternative")) ? { target } : {}),
-      });
-    }
+      };
+    });
+    if (items.length) await ctx.db.insert(pageChunks, { snapshotId, competitorId: snap.competitorId, items });
     await ctx.db.patch(snapshots, snapshotId, { urlCount: snap.urlCount + batch.length });
   },
 });
@@ -144,11 +144,11 @@ export const finish = app.mutation({
     const previous = (await ctx.db.find(snapshots, { competitorId: snap.competitorId }))
       .filter((x) => x.state === "complete")
       .sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0))[0];
-    const current = await ctx.db.find(pages, { snapshotId });
+    const current = await readPages(ctx, snapshotId);
     let newSignals = 0;
     let newTargetingYou = 0;
     if (previous) {
-      const prevUrls = (await ctx.db.find(pages, { snapshotId: previous.id })).map((x) => x.url);
+      const prevUrls = (await readPages(ctx, previous.id)).map((x) => x.url);
       const added = new Set(diffUrls(prevUrls, current.map((x) => x.url)).added);
       const [p] = await ctx.db.find(profile, { scope: "app" });
       for (const x of current) {
@@ -223,5 +223,32 @@ export const recordSite = app.mutation({
     const value = { competitorId, capturedAt: Date.now(), ...site, changes };
     if (prev) await ctx.db.replace(sites, prev.id, value);
     else await ctx.db.insert(sites, value);
+  },
+});
+
+/**
+ * Moves legacy per-URL page rows into chunks, one bounded step per call (one atomic commit).
+ * Returns how many legacy rows remain; the capturer calls it until 0. Safe to call at any time.
+ */
+export const compactLegacy = app.mutation({
+  access: "intel.capture",
+  returns: s.object({ remaining: s.integer() }),
+  handler: async (ctx) => {
+    const batch = await ctx.db.find(pages, {}, { limit: BATCH });
+    if (!batch.length) return { remaining: 0 };
+    const bySnapshot = new Map<string, typeof batch>();
+    for (const x of batch) bySnapshot.set(x.snapshotId, [...(bySnapshot.get(x.snapshotId) ?? []), x]);
+    for (const [snapshotId, rows] of bySnapshot) {
+      const items = rows.map((x) => ({
+        url: x.url,
+        ...(x.lastmod !== undefined ? { lastmod: x.lastmod } : {}),
+        ...(x.lastmodMs !== undefined ? { lastmodMs: x.lastmodMs } : {}),
+        categories: x.categories,
+        ...(x.target !== undefined ? { target: x.target } : {}),
+      }));
+      await ctx.db.insert(pageChunks, { snapshotId, competitorId: rows[0]!.competitorId, items });
+      for (const x of rows) await ctx.db.delete(pages, x.id);
+    }
+    return { remaining: Math.max(0, (await ctx.db.count(pages, {})) - batch.length) };
   },
 });

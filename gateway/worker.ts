@@ -22,7 +22,13 @@ export interface PerformResult {
 }
 
 export async function tick(call: Call, now = Date.now()) {
-  return call<{ queued: string[]; skipped: string[] }>("schedule:claimDue", { now });
+  const due = await call<{ queued: string[]; skipped: string[] }>("schedule:claimDue", { now });
+  // Move any legacy per-URL page rows into chunks, a bounded step at a time (a no-op once done).
+  for (let i = 0; i < 40; i++) {
+    const { remaining } = await call<{ remaining: number }>("snapshots:compactLegacy", {});
+    if (remaining <= 0) break;
+  }
+  return due;
 }
 
 export async function perform(call: Call, fetchText: FetchText, input: { snapshotId?: unknown }): Promise<PerformResult> {

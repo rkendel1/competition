@@ -121,6 +121,12 @@ export const snapshots = app.collection(
   { indexes: [{ fields: ["competitorId"] }, { fields: ["state"] }] },
 );
 
+/**
+ * LEGACY: one row per URL. New captures write `pageChunks` instead; this collection is only read
+ * (until `snapshots:compactLegacy` has moved its rows into chunks). Why: FeltKit's own
+ * housekeeping scans every row of the database once a second, so tens of thousands of page rows
+ * kept a one-CPU machine busy while idle.
+ */
 export const pages = app.collection(
   "pages",
   {
@@ -131,6 +137,25 @@ export const pages = app.collection(
     lastmodMs: s.optional(s.number()),
     categories: s.array(s.enum(["vs", "alternative", "industry", "solution"])),
     target: s.optional(s.string({ maxLength: 200 })),
+  },
+  { indexes: [{ fields: ["snapshotId"] }] },
+);
+
+const PageItem = s.object({
+  url: s.string({ maxLength: 2048 }),
+  lastmod: s.optional(s.string({ maxLength: 64 })),
+  lastmodMs: s.optional(s.number()),
+  categories: s.array(s.enum(["vs", "alternative", "industry", "solution"])),
+  target: s.optional(s.string({ maxLength: 200 })),
+});
+
+/** One snapshot's pages, up to `BATCH` per row: a row per capture batch, not a row per URL. */
+export const pageChunks = app.collection(
+  "pageChunks",
+  {
+    snapshotId: s.ref("snapshots"),
+    competitorId: s.string(),
+    items: s.array(PageItem, { maxItems: 1000 }),
   },
   { indexes: [{ fields: ["snapshotId"] }] },
 );

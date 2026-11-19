@@ -3,7 +3,8 @@
  * Every number in the report is derived from stored, complete snapshots.
  */
 import { fail, s, type QueryCtx } from "@feltdb/feltkit";
-import { app, competitors, pages, profile, sites, snapshots } from "./app.js";
+import { app, competitors, pageChunks, pages, profile, sites, snapshots } from "./app.js";
+import { readPages } from "./_pages.js";
 import { suggest, summarize, type CompetitorDigest, type Suggestion } from "./_site.js";
 import { bidTerms, defaultSitemapUrl, diffUrls, domainOf, targetsBrand, type Category } from "./_sitemap.js";
 
@@ -126,6 +127,7 @@ export const deleteSnapshot = app.mutation({
     // A queued capture can be cancelled (the capturer then skips it); a running one cannot.
     if (snap.state === "collecting" && Date.now() - snap.startedAt < 30 * 60_000) fail("FAILED_PRECONDITION", "This capture is running. Delete it once it finishes.");
     // Counted before deleting: inside the transaction, count() already reflects pending deletes.
+    for (const c of await ctx.db.find(pageChunks, { snapshotId: id })) await ctx.db.delete(pageChunks, c.id);
     const total = await ctx.db.count(pages, { snapshotId: id });
     const batch = await ctx.db.find(pages, { snapshotId: id }, { limit: DELETE_BATCH });
     for (const p of batch) await ctx.db.delete(pages, p.id);
@@ -229,8 +231,8 @@ export const report = app.query({
       return { competitor, brand, totals: empty, windowDays, attacks: [], targets: [], markets: [], recent: [], added: [], removed: [], bidTerms: bidTerms(brand, c.name) };
     }
 
-    const current = await ctx.db.find(pages, { snapshotId: latest.id });
-    const prevUrls = previous ? (await ctx.db.find(pages, { snapshotId: previous.id })).map((x) => x.url) : null;
+    const current = await readPages(ctx, latest.id);
+    const prevUrls = previous ? (await readPages(ctx, previous.id)).map((x) => x.url) : null;
     const diff = prevUrls ? diffUrls(prevUrls, current.map((x) => x.url)) : { added: [], removed: [] };
     const addedSet = new Set(diff.added);
 
@@ -356,8 +358,8 @@ async function digests(ctx: { db: QueryCtx["db"] }): Promise<{ brand: string; al
     if (site) d.site = { homepage: site.homepage, ...(site.pricing ? { pricing: site.pricing } : {}), ...(site.about ? { about: site.about } : {}), changes: site.changes };
     if (latest) {
       d.snapshot = { urls: latest.urlCount, completedAt: latest.completedAt ?? latest.startedAt };
-      const current = await ctx.db.find(pages, { snapshotId: latest.id });
-      const before = previous ? await ctx.db.find(pages, { snapshotId: previous.id }) : null;
+      const current = await readPages(ctx, latest.id);
+      const before = previous ? await readPages(ctx, previous.id) : null;
       const beforeUrls = before ? new Set(before.map((x) => x.url)) : null;
       const tally = new Map<string, number>();
       const marketOf = (u: string) => u.replace(/\/$/, "").split("/").pop()!.replace(/[-_]+/g, " ");
